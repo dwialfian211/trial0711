@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dashboard Penjualan</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+</head>
+<body>
+  <nav class="navbar">
+    <h2>Dashboard Penjualan</h2>
+    <ul class="nav-links">
+      <li><a href="#">Dashboard</a></li>
+      <li><a href="#">Tabel</a></li>
+      <li><a href="#">Rekomendasi</a></li>
+      <li><a href="#">Feedback</a></li>
+    </ul>
+  </nav>
+
+  <div class="filter-container">
+    <label for="location-select">Lokasi:</label>
+    <select id="location-select">
+      <option value="all">Seluruh Lokasi</option>
+    </select>
+    <button id="filter-btn">Filter</button>
+  </div>
+
+  <div class="charts-container">
+    <div class="chart-card">
+      <h3>Penjualan per Departemen (Total)</h3>
+      <canvas id="deptChart"></canvas>
+    </div>
+
+    <div class="chart-card">
+      <h3>Produk Terlaris (Quantity)</h3>
+      <canvas id="productChart"></canvas>
+    </div>
+  </div>
+
+  <div class="table-container">
+    <h3>Data Transaksi (20 baris terbaru)</h3>
+    <table id="dataTable">
+      <thead>
+        <tr>
+          <th>Cust</th>
+          <th>Invoice</th>
+          <th>Date</th>
+          <th>Item Description</th>
+          <th>Amount</th>
+          <th>Quantit</th>
+          <th>Tax</th>
+          <th>Total</th>
+          <th>Salesman Name</th>
+          <th>Dept. Name</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="insight-container">
+    <h3>Rekomendasi / Insight</h3>
+    <p id="insight-text">Sedang memuat insight...</p>
+  </div>
+
+  <div class="feedback-container">
+    <h3>Kirim Feedback</h3>
+    <form id="feedbackForm">
+      <textarea id="feedbackInput" placeholder="Tulis masukan Anda..." required></textarea>
+      <button type="submit">Kirim</button>
+    </form>
+  </div>
+
+  <script>
+  // --- GANTI SHEET_URL DI SINI jika perlu ---
+  const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-LDdb0cukISjUXA-HIKbJAy1ITEg2Dny9C_lBC1p-FDUZ4D7ZcAvoN0_id8z1Dg/pub?output=csv";
+
+  function parseNumber(s) {
+    if (s === null || s === undefined) return 0;
+    // Remove non-numeric except dot and minus
+    const cleaned = (''+s).replace(/[^0-9\.\-]/g, '');
+    return cleaned === '' ? 0 : Number(cleaned);
+  }
+
+  async function fetchAndParse() {
+    const res = await fetch(SHEET_URL);
+    const text = await res.text();
+    return new Promise((resolve) => {
+      Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        complete: results => resolve(results.data)
+      });
+    });
+  }
+
+  function uniq(arr) {
+    return Array.from(new Set(arr));
+  }
+
+  function formatCurrency(n) {
+    return n.toLocaleString('id-ID', {minimumFractionDigits: 0});
+  }
+
+  async function renderDashboard() {
+    const raw = await fetchAndParse();
+
+    // Normalize keys (trim)
+    const data = raw.map(r => {
+      const norm = {};
+      for (const k in r) {
+        norm[k.trim()] = typeof r[k] === 'string' ? r[k].trim() : r[k];
+      }
+      return norm;
+    });
+
+    // expected column names from your sheet: Cust, Invoice, Invoice (date), Item No., Item Description, Amount, Quantit, Tax, Total, Salesman Name, Dept. Name
+    // We'll try to find best matches
+    function getField(obj, candidates) {
+      for (const c of candidates) if (obj[c] !== undefined) return obj[c];
+      return '';
+    }
+
+    const rows = data.map(row => ({
+      Cust: getField(row, ['Cust','Customer','CustID']),
+      Invoice: getField(row, ['Invoice','Invoice No','InvoiceNumber','InvoiceNo']),
+      Date: getField(row, ['Invoice','Date','Invoice Date']),
+      ItemDescription: getField(row, ['Item Description','ItemDescription','Item Desc','Item Desc.','ItemDesc']),
+      Amount: parseNumber(getField(row, ['Amount','Amount ' ,'Amount (IDR)','Amount (USD)'])),
+      Quantit: parseNumber(getField(row, ['Quantit','Quantity','Quantit ' ,'Qty','Quantitiy'])),
+      Tax: parseNumber(getField(row, ['Tax',' TAX','Tax '])),
+      Total: parseNumber(getField(row, ['Total','Total ' ,'Grand Total'])),
+      Salesman: getField(row, ['Salesman Name','Salesman','SalesmanName']),
+      Dept: getField(row, ['Dept. Name','Dept Name','Department','Dept'])
+    }));
+
+    // Populate location select from Dept values
+    const locations = ['all', ...uniq(rows.map(r=>r.Dept).filter(x=>x))];
+    const sel = document.getElementById('location-select');
+    sel.innerHTML = locations.map(l => \`<option value="\${l}">\${l}</option>\`).join('');
+
+    // filter function
+    function applyFilter(dept) {
+      return rows.filter(r => (dept === 'all' || r.Dept === dept));
+    }
+
+    // initial render with 'all'
+    updateVisuals(applyFilter('all'));
+
+    document.getElementById('filter-btn').addEventListener('click', () => {
+      const dept = document.getElementById('location-select').value;
+      updateVisuals(applyFilter(dept));
+    });
+
+    function updateVisuals(filtered) {
+      // Dept totals (sum Total)
+      const deptTotals = {};
+      filtered.forEach(r => {
+        const k = r.Dept || 'Unknown';
+        deptTotals[k] = (deptTotals[k] || 0) + (isNaN(r.Total) ? 0 : r.Total);
+      });
+      const deptEntries = Object.entries(deptTotals).sort((a,b)=>b[1]-a[1]);
+      const deptLabels = deptEntries.map(e=>e[0]);
+      const deptValues = deptEntries.map(e=>e[1]);
+
+      // Product totals by quantity
+      const prodTotals = {};
+      filtered.forEach(r => {
+        const p = r.ItemDescription || 'Unknown Product';
+        prodTotals[p] = (prodTotals[p] || 0) + (isNaN(r.Quantit) ? 0 : r.Quantit);
+      });
+      const prodEntries = Object.entries(prodTotals).sort((a,b)=>b[1]-a[1]).slice(0,12);
+      const prodLabels = prodEntries.map(e=>e[0]);
+      const prodValues = prodEntries.map(e=>e[1]);
+
+      // Render charts (destroy previous if exist)
+      if (window.deptChartInstance) window.deptChartInstance.destroy();
+      const ctx1 = document.getElementById('deptChart').getContext('2d');
+      window.deptChartInstance = new Chart(ctx1, {
+        type: 'bar',
+        data: {
+          labels: deptLabels,
+          datasets: [{ label: 'Total (IDR)', data: deptValues, backgroundColor: '#2b6ea3' }]
+        },
+        options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+      });
+
+      if (window.productChartInstance) window.productChartInstance.destroy();
+      const ctx2 = document.getElementById('productChart').getContext('2d');
+      window.productChartInstance = new Chart(ctx2, {
+        type: 'bar',
+        data: { labels: prodLabels, datasets: [{ label: 'Quantity', data: prodValues, backgroundColor: '#5da8ff' }] },
+        options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } } }
+      });
+
+      // Table (20 newest by Invoice field if date-like; else by order)
+      const tbody = document.querySelector('#dataTable tbody');
+      // try to sort by Date (if parseable)
+      const sortable = filtered.slice();
+      function tryParseDate(s) {
+        if (!s) return null;
+        const d = Date.parse(s);
+        return isNaN(d) ? null : d;
+      }
+      sortable.sort((a,b)=> {
+        const da = tryParseDate(a.Date), db = tryParseDate(b.Date);
+        if (da && db) return db - da;
+        return 0;
+      });
+      const top = sortable.slice(0,20);
+      tbody.innerHTML = top.map(r => \`<tr>
+        <td>\${r.Cust}</td>
+        <td>\${r.Invoice}</td>
+        <td>\${r.Date}</td>
+        <td style="text-align:left">\${r.ItemDescription}</td>
+        <td>\${formatCurrency(r.Amount)}</td>
+        <td>\${r.Quantit}</td>
+        <td>\${formatCurrency(r.Tax)}</td>
+        <td>\${formatCurrency(r.Total)}</td>
+        <td>\${r.Salesman}</td>
+        <td>\${r.Dept}</td>
+      </tr>\`).join('');
+
+      // Insight simple
+      const topDept = deptEntries[0] ? deptEntries[0][0] : 'N/A';
+      const topDeptVal = deptEntries[0] ? deptEntries[0][1] : 0;
+      const topProd = prodEntries[0] ? prodEntries[0][0] : 'N/A';
+      const topProdQty = prodEntries[0] ? prodEntries[0][1] : 0;
+
+      document.getElementById('insight-text').textContent = \`Departemen teratas: \${topDept} (Total: \${formatCurrency(topDeptVal)}). Produk terlaris: \${topProd} (Qty: \${topProdQty}).\`;
+    }
+
+    // Feedback form
+    document.getElementById('feedbackForm').addEventListener('submit', e=>{
+      e.preventDefault();
+      const v = document.getElementById('feedbackInput').value.trim();
+      if (!v) return alert('Tolong isi feedback Anda.');
+      alert('Terima kasih! Feedback diterima (disimpan secara lokal).');
+      e.target.reset();
+    });
+  }
+
+  renderDashboard().catch(e => {
+    console.error(e);
+    document.getElementById('insight-text').textContent = 'Gagal memuat data. Pastikan SHEET_URL sudah dipublikasi sebagai CSV.';
+  });
+  </script>
+</body>
+</html>
